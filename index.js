@@ -54,7 +54,7 @@ function captureLastUserMessage() {
 // ---------- 프롬프트 맨 끝으로 강제 재배치 ----------
 
 function isForceEnabled() {
-    return !!getConfig().enabled && !!lastUserText;
+    return !!getConfig().enabled;
 }
 
 function wrapUserInput(text) {
@@ -62,30 +62,37 @@ function wrapUserInput(text) {
     return `<${tag}>\n${text}\n</${tag}>`;
 }
 
-// 핵심 수정 포인트:
-// 예전 버전은 "raw 텍스트와 정확히 일치하는 항목"만 찾아서 제거했는데,
-// 한 번 감싸서(payload) 맨 끝에 push하고 나면 그 항목의 content는 더 이상
-// raw 텍스트와 "정확히 같지" 않고 태그로 감싸진 형태가 됨.
-// 그래서 그 다음 생성(이어쓰기/재생성/스와이프 등, 새 유저 입력 없이 다시 생성되는 경우)
-// 에서는 기존 항목을 못 찾고 매번 새로 push만 해서 중복이 쌓였음 (구버전 버그의 실제 원인).
+// 핵심 수정 포인트 (텍스트 내용 매칭 완전 폐기):
+// 예전 버전들은 전부 "저장해둔 lastUserText와 내용이 일치하는 항목"을 배열에서
+// 찾아 제거→재배치하는 방식이었음. 근데 유저 인풋은 아무 태그 없이 다른 프롬프트
+// 조각들 사이에 plain 텍스트로 섞여 들어가기 때문에, 완전히 같은 문장이 과거에도
+// 있었거나 포맷이 살짝만 달라도 엉뚱한 걸 찾거나 아예 못 찾는 문제가 있었음.
 //
-// 해결: raw 텍스트가 "포함된" user 항목을 찾도록 완화 -> 이전에 감싸서 넣어둔
-// 항목도 정확히 찾아서 제거 후 재배치하므로, 몇 번을 다시 호출해도 중복 없이
-// 항상 딱 1개만 맨 끝에 존재하게 됨 (idempotent). lastUserText를 강제로 비우는
-// "소모" 처리도 하지 않으므로, 이벤트가 한 생성당 여러 번 발생해도 안전함.
-function findExistingIndex(chatArray, rawText) {
+// 새 방식: 내용을 저장해뒀다가 비교하는 걸 그만두고, eventData.chat(=이번 생성에
+// 실제로 쓰일 배열, 이미 완성된 상태) 안에서 role이 "user"인 항목 중 배열 끝에서
+// 가장 가까운 것을 그냥 찾음. 그 배열의 "마지막 user 항목"은 정의상 항상
+// "이번 생성 요청이 답해야 할 그 입력"이기 때문에 텍스트 비교 자체가 필요 없음.
+//   - 새 인풋을 보낸 경우 → 그 항목이 곧 방금 보낸 텍스트
+//   - 이어쓰기/재생성/스와이프처럼 새 입력 없이 다시 생성되는 경우
+//     → 그 항목은 여전히 그 이전에 보낸 텍스트 그대로 (자동으로 맞아떨어짐)
+// 그 항목의 content를 태그로 감싸고, 혹시 그 뒤에 다른 확장이 뭔가 붙여놨어도
+// 상관없이 배열의 진짜 맨 끝으로 옮겨줌.
+function findLastUserIndex(chatArray) {
     for (let i = chatArray.length - 1; i >= 0; i--) {
         const entry = chatArray[i];
-        if (
-            entry &&
-            entry.role === "user" &&
-            typeof entry.content === "string" &&
-            entry.content.includes(rawText)
-        ) {
+        if (entry && entry.role === "user" && typeof entry.content === "string") {
             return i;
         }
     }
     return -1;
+}
+
+// 이미 감싸진 상태인지 확인 (같은 요청 안에서 이벤트가 여러 번 불려도 이중으로
+// 감싸지 않도록 방지)
+function isAlreadyWrapped(content, tag) {
+    const open = `<${tag}>`;
+    const close = `</${tag}>`;
+    return content.trimStart().startsWith(open) && content.trimEnd().endsWith(close);
 }
 
 // Chat Completion (Gemini/Vertex, Claude API, OpenAI 등)
@@ -96,15 +103,26 @@ function onChatCompletionPromptReady(eventData) {
         if (!Array.isArray(eventData.chat)) return;
 
         const chat = eventData.chat;
-        const payload = wrapUserInput(lastUserText);
+        const targetIndex = findLastUserIndex(chat);
+        if (targetIndex === -1) return; // user 항목이 아예 없으면 관여 안 함
 
-        // 기존에 들어가 있던 항목(raw든, 이미 감싸진 형태든)을 정확히 찾아서 제거
-        const removeIndex = findExistingIndex(chat, lastUserText);
-        if (removeIndex !== -1) {
-            chat.splice(removeIndex, 1);
+        const tag = (getConfig().wrapTag || DEFAULT_CONFIG.wrapTag).trim() || DEFAULT_CONFIG.wrapTag;
+        const target = chat[targetIndex];
+
+        // 원본 텍스트 추출 (이미 감싸진 상태면 안쪽 텍스트만, 아니면 그대로)
+        let rawText = target.content;
+        if (isAlreadyWrapped(rawText, tag)) {
+            rawText = rawText
+                .replace(new RegExp(`^\\s*<${tag}>\\s*`), "")
+                .replace(new RegExp(`\\s*</${tag}>\\s*$`), "");
         }
 
+        const payload = wrapUserInput(rawText);
+
+        // 배열의 실제 마지막 위치로 옮김 (다른 확장이 뒤에 뭔가 붙여놨어도 무시하고 최하단으로)
+        chat.splice(targetIndex, 1);
         chat.push({ role: "user", content: payload });
+
         console.log(`[Force Last Input Plus] chat-completion 맨 끝으로 강제 재배치됨 (len=${payload.length})`);
     } catch (e) {
         console.error("[Force Last Input Plus] chat-completion 재배치 실패:", e);
@@ -112,10 +130,13 @@ function onChatCompletionPromptReady(eventData) {
 }
 
 // Text Completion (KoboldAI, 로컬 모델 등)
+// 참고: 문자열 프롬프트는 chat 배열처럼 "역할(role)"이 구분돼 있지 않아서
+// 위치 기반으로 "마지막 user 항목"을 찾을 방법이 없음. 이 경로는 어쩔 수 없이
+// MESSAGE_SENT에서 캡처해둔 lastUserText(가장 최근 전송된 유저 텍스트)를 그대로 씀.
 function onTextCompletionPromptReady(eventData) {
     try {
         if (!eventData) return;
-        if (!isForceEnabled()) return;
+        if (!isForceEnabled() || !lastUserText) return;
         if (typeof eventData.prompt !== "string") return;
 
         const payload = wrapUserInput(lastUserText);
