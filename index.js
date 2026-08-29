@@ -16,7 +16,7 @@ const DEFAULT_CONFIG = {
     wrapTag: "User's Input",
 };
 
-// (lastUserText를 캐싱하지 않고 매번 실시간으로 조회함 - 아래 getCurrentLastUserText 참고)
+// (lastUserText를 캐싱하지 않고 매번 실시간으로 조회함 - 아래 getPendingUserText 참고)
 
 // ---------- 설정 헬퍼 ----------
 
@@ -32,30 +32,26 @@ function saveConfig() {
     saveSettingsDebounced();
 }
 
-// ---------- 지금 이 순간의 "진짜 마지막 유저 메시지" 실시간 조회 ----------
-// 예전엔 MESSAGE_SENT 이벤트 시점에 텍스트를 변수에 캐싱해뒀다가 나중에
-// 꺼내 쓰는 방식이었음. 근데 이러면 "캡처된 이후에 원본이 바뀌는" 모든
-// 경우에 다 취약함:
-//   - 답변을 지우고 다시 생성 -> MESSAGE_SENT가 다시 안 뜸 -> 캐시가 안 바뀜
-//   - 이미 보낸 메시지를 편집(수정)하고 재생성 -> 이것도 MESSAGE_SENT가 아님
-//     -> 편집 전 텍스트가 캐시에 그대로 남아서 옛날 내용이 주입됨 (실제로 겪은 버그)
-//
-// 그래서 캐싱을 아예 없애고, 프롬프트가 준비되는 바로 그 순간에
-// context.chat(진짜 실시간 채팅 기록)을 직접 읽어서 "지금 이 순간의 마지막
-// 유저 메시지"를 가져옴. 이러면 편집/삭제/재작성 등 무엇이 일어났든 항상
-// 그 순간의 최신 상태를 정확히 반영함.
-function getCurrentLastUserText() {
+// ---------- 지금 이 순간 "주입이 필요한 상태인지" 판단 ----------
+// 오늘 겪은 모든 케이스를 관통하는 진짜 기준: context.chat(진짜 채팅 기록)의
+// **가장 마지막 항목이 유저 메시지인지, AI 응답인지**만 보면 됨.
+//   - 마지막 항목이 유저 메시지 = 그 인풋에 대한 응답을 아직 못 받은 상태
+//     (새로 보냄 / 답변 취소 / 답변 삭제 / 재생성 시작 시 기존 응답이 잠깐
+//      제거된 상태) -> 주입 필요
+//   - 마지막 항목이 AI 응답 = 이미 정상적으로 응답을 받은 상태에서 아무것도
+//     안 쓰고 그냥 또 전송(이어쓰기) -> 주입 불필요, 평범하게 진행
+// 텍스트를 캐싱해두거나 비교할 필요 없이, 이 순간 chat 배열의 맨 끝 항목의
+// 역할(role)만 보면 되므로 편집/삭제/재작성 어떤 경우든 항상 정확함.
+function getPendingUserText() {
     try {
         const context = getContext();
         const chat = context.chat;
         if (!Array.isArray(chat) || chat.length === 0) return "";
-        for (let i = chat.length - 1; i >= 0; i--) {
-            const entry = chat[i];
-            if (entry && entry.is_user) {
-                return (entry.mes || "").trim();
-            }
+        const last = chat[chat.length - 1];
+        if (last && last.is_user) {
+            return (last.mes || "").trim();
         }
-        return "";
+        return ""; // 마지막이 AI 응답이면 = 이미 답변 받은 상태 -> 주입 안 함
     } catch (e) {
         console.error("[Force Last Input Plus] 유저 메시지 조회 실패:", e);
         return "";
@@ -113,7 +109,7 @@ function onChatCompletionPromptReady(eventData) {
     try {
         if (!eventData || eventData.dryRun) return;
 
-        const rawText = getCurrentLastUserText();
+        const rawText = getPendingUserText();
         if (!isForceEnabled(rawText)) return;
         if (!Array.isArray(eventData.chat)) return;
 
@@ -144,7 +140,7 @@ function onTextCompletionPromptReady(eventData) {
     try {
         if (!eventData) return;
 
-        const rawText = getCurrentLastUserText();
+        const rawText = getPendingUserText();
         if (!isForceEnabled(rawText)) return;
         if (typeof eventData.prompt !== "string") return;
 
