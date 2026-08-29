@@ -17,8 +17,6 @@ const DEFAULT_CONFIG = {
 };
 
 let lastUserText = ""; // 가장 최근에 "전송"된 유저 메시지 원문
-let appliedFlagChat = false; // chat-completion 경로에서 lastUserText를 이미 적용했는지
-let appliedFlagText = false; // text-completion 경로에서 lastUserText를 이미 적용했는지
 
 // ---------- 설정 헬퍼 ----------
 
@@ -39,11 +37,13 @@ function saveConfig() {
 // 여기서 그 시점의 최종 텍스트를 그대로 가져옵니다 (impersonate 등으로 텍스트가
 // 바뀌는 경우까지 정확히 반영됨).
 //
-// 중요: "진짜 새로운 텍스트"일 때만 두 플래그를 리셋함. 입력창을 비운 채로
-// 그냥 전송 버튼만 누르거나(재생성/이어쓰기/스와이프 등) 실질적으로 새 텍스트가
-// 없는 경우엔 lastUserText가 이전과 동일하게 유지되므로 플래그도 그대로
-// true로 남아있고, 그 결과 아래 프롬프트 준비 단계에서 재주입을 건너뛰게 됨
-// (= "평범하게 이어서 답변받음" 요구사항의 핵심).
+// 참고: 예전엔 "이미 적용했으면 재적용 안 함" 플래그를 뒀었는데, 그러면
+// 답변을 지우고 다시 생성하는 경우처럼 "새 텍스트는 아니지만 다시 강제
+// 배치가 필요한" 상황을 놓치는 문제가 있었음. eventData.chat은 매 생성마다
+// context.chat(원본, 우리가 안 건드리는 진짜 채팅 기록)에서 새로 만들어지는
+// 임시 배열이라, 아래 findMatchingIndex가 감싸진 형태까지 찾아내는 한
+// 몇 번을 다시 찾아서 감싸도 항상 결과는 "맨 끝에 딱 1개"로 idempotent함.
+// 그래서 플래그 없이 매번 무조건 다시 적용하는 게 오히려 더 간단하고 정확함.
 function captureLastUserMessage() {
     try {
         const context = getContext();
@@ -51,12 +51,7 @@ function captureLastUserMessage() {
         if (!Array.isArray(chat) || chat.length === 0) return;
         const last = chat[chat.length - 1];
         if (last && last.is_user) {
-            const newText = (last.mes || "").trim();
-            if (newText !== lastUserText) {
-                lastUserText = newText;
-                appliedFlagChat = false;
-                appliedFlagText = false;
-            }
+            lastUserText = (last.mes || "").trim();
         }
     } catch (e) {
         console.error("[Force Last Input Plus] 유저 메시지 캡처 실패:", e);
@@ -65,12 +60,8 @@ function captureLastUserMessage() {
 
 // ---------- 프롬프트 맨 끝으로 강제 재배치 ----------
 
-// chat-completion과 text-completion은 서로 독립적인 경로임. 한 번의 생성에
-// 두 이벤트가 같이(혹은 순서대로) 발동되는 환경도 있어서, 플래그를 공유하면
-// 한쪽이 먼저 실행되며 "이미 적용됨"으로 소모해버려 실제로 필요한 다른 쪽이
-// 스킵되는 문제가 있었음(이번에 겪은 버그). 그래서 완전히 분리해서 관리함.
-function isForceEnabled(appliedFlag) {
-    return !!getConfig().enabled && !!lastUserText && !appliedFlag;
+function isForceEnabled() {
+    return !!getConfig().enabled && !!lastUserText;
 }
 
 function wrapUserInput(text) {
@@ -118,7 +109,7 @@ function findMatchingIndex(chatArray, rawText) {
 function onChatCompletionPromptReady(eventData) {
     try {
         if (!eventData || eventData.dryRun) return;
-        if (!isForceEnabled(appliedFlagChat)) return;
+        if (!isForceEnabled()) return;
         if (!Array.isArray(eventData.chat)) return;
 
         const chat = eventData.chat;
@@ -133,7 +124,6 @@ function onChatCompletionPromptReady(eventData) {
         // 배열의 실제 마지막 위치로 옮김 (다른 확장이 뒤에 뭔가 붙여놨어도 무시하고 최하단으로)
         chat.splice(targetIndex, 1);
         chat.push({ role: "user", content: payload });
-        appliedFlagChat = true; // 이 텍스트에 대해서는 완료 -> 새 인풋 오기 전까진 재주입 안 함
 
         console.log(`[Force Last Input Plus] chat-completion 맨 끝으로 강제 재배치됨 (len=${payload.length})`);
     } catch (e) {
@@ -148,7 +138,7 @@ function onChatCompletionPromptReady(eventData) {
 function onTextCompletionPromptReady(eventData) {
     try {
         if (!eventData) return;
-        if (!isForceEnabled(appliedFlagText)) return;
+        if (!isForceEnabled()) return;
         if (typeof eventData.prompt !== "string") return;
 
         const payload = wrapUserInput(lastUserText);
@@ -161,7 +151,6 @@ function onTextCompletionPromptReady(eventData) {
         }
 
         eventData.prompt = `${eventData.prompt}\n${payload}\n`;
-        appliedFlagText = true; // 이 텍스트에 대해서는 완료 -> 새 인풋 오기 전까진 재주입 안 함
         console.log(`[Force Last Input Plus] text-completion 맨 끝에 강제 삽입됨 (len=${payload.length})`);
     } catch (e) {
         console.error("[Force Last Input Plus] text-completion 재배치 실패:", e);
