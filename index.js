@@ -16,7 +16,7 @@ const DEFAULT_CONFIG = {
     wrapTag: "User's Input",
 };
 
-let lastUserText = ""; // 가장 최근에 "전송"된 유저 메시지 원문
+// (lastUserText를 캐싱하지 않고 매번 실시간으로 조회함 - 아래 getCurrentLastUserText 참고)
 
 // ---------- 설정 헬퍼 ----------
 
@@ -32,36 +32,40 @@ function saveConfig() {
     saveSettingsDebounced();
 }
 
-// ---------- 최근 전송된 유저 메시지 캡처 ----------
-// MESSAGE_SENT는 유저 메시지가 채팅 배열에 실제로 추가된 직후 발생하므로,
-// 여기서 그 시점의 최종 텍스트를 그대로 가져옵니다 (impersonate 등으로 텍스트가
-// 바뀌는 경우까지 정확히 반영됨).
+// ---------- 지금 이 순간의 "진짜 마지막 유저 메시지" 실시간 조회 ----------
+// 예전엔 MESSAGE_SENT 이벤트 시점에 텍스트를 변수에 캐싱해뒀다가 나중에
+// 꺼내 쓰는 방식이었음. 근데 이러면 "캡처된 이후에 원본이 바뀌는" 모든
+// 경우에 다 취약함:
+//   - 답변을 지우고 다시 생성 -> MESSAGE_SENT가 다시 안 뜸 -> 캐시가 안 바뀜
+//   - 이미 보낸 메시지를 편집(수정)하고 재생성 -> 이것도 MESSAGE_SENT가 아님
+//     -> 편집 전 텍스트가 캐시에 그대로 남아서 옛날 내용이 주입됨 (실제로 겪은 버그)
 //
-// 참고: 예전엔 "이미 적용했으면 재적용 안 함" 플래그를 뒀었는데, 그러면
-// 답변을 지우고 다시 생성하는 경우처럼 "새 텍스트는 아니지만 다시 강제
-// 배치가 필요한" 상황을 놓치는 문제가 있었음. eventData.chat은 매 생성마다
-// context.chat(원본, 우리가 안 건드리는 진짜 채팅 기록)에서 새로 만들어지는
-// 임시 배열이라, 아래 findMatchingIndex가 감싸진 형태까지 찾아내는 한
-// 몇 번을 다시 찾아서 감싸도 항상 결과는 "맨 끝에 딱 1개"로 idempotent함.
-// 그래서 플래그 없이 매번 무조건 다시 적용하는 게 오히려 더 간단하고 정확함.
-function captureLastUserMessage() {
+// 그래서 캐싱을 아예 없애고, 프롬프트가 준비되는 바로 그 순간에
+// context.chat(진짜 실시간 채팅 기록)을 직접 읽어서 "지금 이 순간의 마지막
+// 유저 메시지"를 가져옴. 이러면 편집/삭제/재작성 등 무엇이 일어났든 항상
+// 그 순간의 최신 상태를 정확히 반영함.
+function getCurrentLastUserText() {
     try {
         const context = getContext();
         const chat = context.chat;
-        if (!Array.isArray(chat) || chat.length === 0) return;
-        const last = chat[chat.length - 1];
-        if (last && last.is_user) {
-            lastUserText = (last.mes || "").trim();
+        if (!Array.isArray(chat) || chat.length === 0) return "";
+        for (let i = chat.length - 1; i >= 0; i--) {
+            const entry = chat[i];
+            if (entry && entry.is_user) {
+                return (entry.mes || "").trim();
+            }
         }
+        return "";
     } catch (e) {
-        console.error("[Force Last Input Plus] 유저 메시지 캡처 실패:", e);
+        console.error("[Force Last Input Plus] 유저 메시지 조회 실패:", e);
+        return "";
     }
 }
 
 // ---------- 프롬프트 맨 끝으로 강제 재배치 ----------
 
-function isForceEnabled() {
-    return !!getConfig().enabled && !!lastUserText;
+function isForceEnabled(rawText) {
+    return !!getConfig().enabled && !!rawText;
 }
 
 function wrapUserInput(text) {
@@ -81,12 +85,11 @@ function normalize(text) {
 // 프롬프트 구조를 닫기 위해 끼워넣는 더미 user 턴(예: </chat_log></engine_prompt>
 // 같은 것)을 진짜 유저 입력으로 착각해서 엉뚱한 걸 잡아버리는 문제가 있었음.
 //
-// 그래서 다시 "내용 매칭" 기반으로 돌아가되, MESSAGE_SENT에서 캡처해둔
-// lastUserText(=진짜 context.chat에서 가져온, 신뢰 가능한 원본 텍스트)와
-// 정규화 후 비교해서 찾음. 더미 항목은 유저가 실제로 친 텍스트를 담고 있을
-// 리가 없으니 이 매칭에 절대 걸리지 않음. 배열 끝에서부터 검색해서 가장
-// 마지막에 나오는 매칭 항목을 잡으므로, 같은 문장이 과거에도 있었더라도
-// 항상 최신 발화 위치를 정확히 찾음.
+// 그래서 "내용 매칭" 기반으로, 방금 실시간으로 읽어온 rawText(=지금 이 순간
+// context.chat의 진짜 마지막 유저 메시지)와 정규화 후 비교해서 찾음. 더미
+// 항목은 유저가 실제로 친 텍스트를 담고 있을 리가 없으니 이 매칭에 절대
+// 걸리지 않음. 배열 끝에서부터 검색해서 가장 마지막에 나오는 매칭 항목을
+// 잡으므로, 같은 문장이 과거에도 있었더라도 항상 최신 발화 위치를 정확히 찾음.
 // 실제 context.chat(채팅 로그)은 전혀 건드리지 않고, eventData.chat(이번
 // 생성에만 쓰이는 임시 배열)만 조작 -> 화면/저장 데이터에는 영향 없음.
 function findMatchingIndex(chatArray, rawText) {
@@ -109,17 +112,19 @@ function findMatchingIndex(chatArray, rawText) {
 function onChatCompletionPromptReady(eventData) {
     try {
         if (!eventData || eventData.dryRun) return;
-        if (!isForceEnabled()) return;
+
+        const rawText = getCurrentLastUserText();
+        if (!isForceEnabled(rawText)) return;
         if (!Array.isArray(eventData.chat)) return;
 
         const chat = eventData.chat;
-        const targetIndex = findMatchingIndex(chat, lastUserText);
+        const targetIndex = findMatchingIndex(chat, rawText);
         if (targetIndex === -1) {
             console.warn("[Force Last Input Plus] 일치하는 유저 입력을 찾지 못해 관여하지 않음");
             return;
         }
 
-        const payload = wrapUserInput(lastUserText);
+        const payload = wrapUserInput(rawText);
 
         // 배열의 실제 마지막 위치로 옮김 (다른 확장이 뒤에 뭔가 붙여놨어도 무시하고 최하단으로)
         chat.splice(targetIndex, 1);
@@ -133,15 +138,17 @@ function onChatCompletionPromptReady(eventData) {
 
 // Text Completion (KoboldAI, 로컬 모델 등)
 // 참고: 문자열 프롬프트는 chat 배열처럼 "역할(role)"이 구분돼 있지 않아서
-// 위치 기반으로 "마지막 user 항목"을 찾을 방법이 없음. 이 경로는 어쩔 수 없이
-// MESSAGE_SENT에서 캡처해둔 lastUserText(가장 최근 전송된 유저 텍스트)를 그대로 씀.
+// 위치 기반으로 "마지막 user 항목"을 찾을 방법이 없음. 여기서도 캐싱된 값
+// 대신 매번 실시간으로 조회한 텍스트를 사용함.
 function onTextCompletionPromptReady(eventData) {
     try {
         if (!eventData) return;
-        if (!isForceEnabled()) return;
+
+        const rawText = getCurrentLastUserText();
+        if (!isForceEnabled(rawText)) return;
         if (typeof eventData.prompt !== "string") return;
 
-        const payload = wrapUserInput(lastUserText);
+        const payload = wrapUserInput(rawText);
 
         // 문자열 프롬프트는 정확한 위치 splice가 불가능함.
         // 대신 프롬프트가 이미 이 payload로 끝나 있으면(같은 생성 도중 이벤트가
@@ -158,8 +165,6 @@ function onTextCompletionPromptReady(eventData) {
 }
 
 function registerHooks() {
-    eventSource.on(event_types.MESSAGE_SENT, captureLastUserMessage);
-
     if (event_types.CHAT_COMPLETION_PROMPT_READY) {
         eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
     } else {
