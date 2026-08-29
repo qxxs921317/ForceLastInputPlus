@@ -54,7 +54,7 @@ function captureLastUserMessage() {
 // ---------- 프롬프트 맨 끝으로 강제 재배치 ----------
 
 function isForceEnabled() {
-    return !!getConfig().enabled;
+    return !!getConfig().enabled && !!lastUserText;
 }
 
 function wrapUserInput(text) {
@@ -62,37 +62,40 @@ function wrapUserInput(text) {
     return `<${tag}>\n${text}\n</${tag}>`;
 }
 
-// 핵심 수정 포인트 (텍스트 내용 매칭 완전 폐기):
-// 예전 버전들은 전부 "저장해둔 lastUserText와 내용이 일치하는 항목"을 배열에서
-// 찾아 제거→재배치하는 방식이었음. 근데 유저 인풋은 아무 태그 없이 다른 프롬프트
-// 조각들 사이에 plain 텍스트로 섞여 들어가기 때문에, 완전히 같은 문장이 과거에도
-// 있었거나 포맷이 살짝만 달라도 엉뚱한 걸 찾거나 아예 못 찾는 문제가 있었음.
+// 공백류(스페이스/탭/줄바꿈 연속)를 전부 한 칸으로 합치고 앞뒤 trim.
+// 유저가 실제로 입력한 텍스트와 eventData.chat 안에 들어있는 텍스트가
+// 개행 방식/트레일링 스페이스 등 사소한 포맷 차이로 어긋나는 경우를 흡수하기 위함.
+function normalize(text) {
+    return String(text).replace(/\s+/g, " ").trim();
+}
+
+// 핵심 로직:
+// role만 보고 "마지막 user 항목"을 잡으면, 백엔드(Gemini 프롬프트 빌더 등)가
+// 프롬프트 구조를 닫기 위해 끼워넣는 더미 user 턴(예: </chat_log></engine_prompt>
+// 같은 것)을 진짜 유저 입력으로 착각해서 엉뚱한 걸 잡아버리는 문제가 있었음.
 //
-// 새 방식: 내용을 저장해뒀다가 비교하는 걸 그만두고, eventData.chat(=이번 생성에
-// 실제로 쓰일 배열, 이미 완성된 상태) 안에서 role이 "user"인 항목 중 배열 끝에서
-// 가장 가까운 것을 그냥 찾음. 그 배열의 "마지막 user 항목"은 정의상 항상
-// "이번 생성 요청이 답해야 할 그 입력"이기 때문에 텍스트 비교 자체가 필요 없음.
-//   - 새 인풋을 보낸 경우 → 그 항목이 곧 방금 보낸 텍스트
-//   - 이어쓰기/재생성/스와이프처럼 새 입력 없이 다시 생성되는 경우
-//     → 그 항목은 여전히 그 이전에 보낸 텍스트 그대로 (자동으로 맞아떨어짐)
-// 그 항목의 content를 태그로 감싸고, 혹시 그 뒤에 다른 확장이 뭔가 붙여놨어도
-// 상관없이 배열의 진짜 맨 끝으로 옮겨줌.
-function findLastUserIndex(chatArray) {
+// 그래서 다시 "내용 매칭" 기반으로 돌아가되, MESSAGE_SENT에서 캡처해둔
+// lastUserText(=진짜 context.chat에서 가져온, 신뢰 가능한 원본 텍스트)와
+// 정규화 후 비교해서 찾음. 더미 항목은 유저가 실제로 친 텍스트를 담고 있을
+// 리가 없으니 이 매칭에 절대 걸리지 않음. 배열 끝에서부터 검색해서 가장
+// 마지막에 나오는 매칭 항목을 잡으므로, 같은 문장이 과거에도 있었더라도
+// 항상 최신 발화 위치를 정확히 찾음.
+// 실제 context.chat(채팅 로그)은 전혀 건드리지 않고, eventData.chat(이번
+// 생성에만 쓰이는 임시 배열)만 조작 -> 화면/저장 데이터에는 영향 없음.
+function findMatchingIndex(chatArray, rawText) {
+    const target = normalize(rawText);
+    if (!target) return -1;
+
     for (let i = chatArray.length - 1; i >= 0; i--) {
         const entry = chatArray[i];
         if (entry && entry.role === "user" && typeof entry.content === "string") {
-            return i;
+            const normalizedContent = normalize(entry.content);
+            if (normalizedContent === target || normalizedContent.includes(target)) {
+                return i;
+            }
         }
     }
     return -1;
-}
-
-// 이미 감싸진 상태인지 확인 (같은 요청 안에서 이벤트가 여러 번 불려도 이중으로
-// 감싸지 않도록 방지)
-function isAlreadyWrapped(content, tag) {
-    const open = `<${tag}>`;
-    const close = `</${tag}>`;
-    return content.trimStart().startsWith(open) && content.trimEnd().endsWith(close);
 }
 
 // Chat Completion (Gemini/Vertex, Claude API, OpenAI 등)
@@ -103,21 +106,13 @@ function onChatCompletionPromptReady(eventData) {
         if (!Array.isArray(eventData.chat)) return;
 
         const chat = eventData.chat;
-        const targetIndex = findLastUserIndex(chat);
-        if (targetIndex === -1) return; // user 항목이 아예 없으면 관여 안 함
-
-        const tag = (getConfig().wrapTag || DEFAULT_CONFIG.wrapTag).trim() || DEFAULT_CONFIG.wrapTag;
-        const target = chat[targetIndex];
-
-        // 원본 텍스트 추출 (이미 감싸진 상태면 안쪽 텍스트만, 아니면 그대로)
-        let rawText = target.content;
-        if (isAlreadyWrapped(rawText, tag)) {
-            rawText = rawText
-                .replace(new RegExp(`^\\s*<${tag}>\\s*`), "")
-                .replace(new RegExp(`\\s*</${tag}>\\s*$`), "");
+        const targetIndex = findMatchingIndex(chat, lastUserText);
+        if (targetIndex === -1) {
+            console.warn("[Force Last Input Plus] 일치하는 유저 입력을 찾지 못해 관여하지 않음");
+            return;
         }
 
-        const payload = wrapUserInput(rawText);
+        const payload = wrapUserInput(lastUserText);
 
         // 배열의 실제 마지막 위치로 옮김 (다른 확장이 뒤에 뭔가 붙여놨어도 무시하고 최하단으로)
         chat.splice(targetIndex, 1);
