@@ -16,7 +16,8 @@ const DEFAULT_CONFIG = {
     wrapTag: "User's Input",
 };
 
-let lastUserText = ""; // 가장 최근에 "전송"된 유저 메시지 원문 (계속 유지됨 - 소모/클리어 안 함)
+let lastUserText = ""; // 가장 최근에 "전송"된 유저 메시지 원문
+let appliedFlag = false; // lastUserText에 대해 이미 한 번 강제 주입을 완료했는지 여부
 
 // ---------- 설정 헬퍼 ----------
 
@@ -35,8 +36,13 @@ function saveConfig() {
 // ---------- 최근 전송된 유저 메시지 캡처 ----------
 // MESSAGE_SENT는 유저 메시지가 채팅 배열에 실제로 추가된 직후 발생하므로,
 // 여기서 그 시점의 최종 텍스트를 그대로 가져옵니다 (impersonate 등으로 텍스트가
-// 바뀌는 경우까지 정확히 반영됨). 새 유저 입력이 들어올 때마다 자동으로 갱신됨.
-
+// 바뀌는 경우까지 정확히 반영됨).
+//
+// 중요: "진짜 새로운 텍스트"일 때만 appliedFlag를 리셋함. 입력창을 비운 채로
+// 그냥 전송 버튼만 누르거나(재생성/이어쓰기/스와이프 등) 실질적으로 새 텍스트가
+// 없는 경우엔 lastUserText가 이전과 동일하게 유지되므로 appliedFlag도 그대로
+// true로 남아있고, 그 결과 아래 프롬프트 준비 단계에서 재주입을 건너뛰게 됨
+// (= "평범하게 이어서 답변받음" 요구사항의 핵심).
 function captureLastUserMessage() {
     try {
         const context = getContext();
@@ -44,7 +50,11 @@ function captureLastUserMessage() {
         if (!Array.isArray(chat) || chat.length === 0) return;
         const last = chat[chat.length - 1];
         if (last && last.is_user) {
-            lastUserText = (last.mes || "").trim();
+            const newText = (last.mes || "").trim();
+            if (newText !== lastUserText) {
+                lastUserText = newText;
+                appliedFlag = false;
+            }
         }
     } catch (e) {
         console.error("[Force Last Input Plus] 유저 메시지 캡처 실패:", e);
@@ -54,7 +64,7 @@ function captureLastUserMessage() {
 // ---------- 프롬프트 맨 끝으로 강제 재배치 ----------
 
 function isForceEnabled() {
-    return !!getConfig().enabled && !!lastUserText;
+    return !!getConfig().enabled && !!lastUserText && !appliedFlag;
 }
 
 function wrapUserInput(text) {
@@ -117,6 +127,7 @@ function onChatCompletionPromptReady(eventData) {
         // 배열의 실제 마지막 위치로 옮김 (다른 확장이 뒤에 뭔가 붙여놨어도 무시하고 최하단으로)
         chat.splice(targetIndex, 1);
         chat.push({ role: "user", content: payload });
+        appliedFlag = true; // 이 텍스트에 대해서는 완료 -> 새 인풋 오기 전까진 재주입 안 함
 
         console.log(`[Force Last Input Plus] chat-completion 맨 끝으로 강제 재배치됨 (len=${payload.length})`);
     } catch (e) {
@@ -144,6 +155,7 @@ function onTextCompletionPromptReady(eventData) {
         }
 
         eventData.prompt = `${eventData.prompt}\n${payload}\n`;
+        appliedFlag = true; // 이 텍스트에 대해서는 완료 -> 새 인풋 오기 전까진 재주입 안 함
         console.log(`[Force Last Input Plus] text-completion 맨 끝에 강제 삽입됨 (len=${payload.length})`);
     } catch (e) {
         console.error("[Force Last Input Plus] text-completion 재배치 실패:", e);
