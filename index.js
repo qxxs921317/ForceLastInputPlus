@@ -18,6 +18,12 @@ const DEFAULT_CONFIG = {
 
 // (lastUserText를 캐싱하지 않고 매번 실시간으로 조회함 - 아래 getPendingUserText 참고)
 
+// 이번 생성이 어떤 종류인지(swipe / regenerate / continue / 일반 전송 등)를 기억해둠.
+// 스와이프와 "입력 없이 그냥 또 전송(이어쓰기)"은 context.chat 상태가 완전히 똑같아서
+// (둘 다 마지막 항목이 AI 응답) 채팅 기록만 봐서는 절대 구분할 수 없음.
+// 그래서 생성이 시작될 때 ST가 알려주는 type을 붙잡아둠.
+let lastGenerationType = null;
+
 // ---------- 설정 헬퍼 ----------
 
 function getConfig() {
@@ -51,11 +57,40 @@ function getPendingUserText() {
         if (last && last.is_user) {
             return (last.mes || "").trim();
         }
+
+        // --- 여기부터 추가: 스와이프 / 재생성 대응 ---
+        // 스와이프(다시 굴리기)를 누르면 그 AI 응답은 "버리고 새로 만드는" 것이므로,
+        // 사실상 직전 유저 인풋에 대한 답을 다시 받는 상황임. 즉 일반 전송과 똑같이
+        // 유저 인풋이 맨 밑에 있어야 함.
+        // 그런데 이 순간 context.chat의 마지막 항목은 (아직 지워지지 않은) AI 응답이라
+        // 위의 is_user 검사에 걸리지 않아서, 지금까지 스와이프 때만 기능이 통째로
+        // 빠져있었음. 그래서 이 경우에만 배열을 거꾸로 훑어 직전 유저 메시지를 찾음.
+        //
+        // ⚠️ "입력 없이 그냥 또 전송(이어쓰기)"도 마지막 항목이 AI 응답이라 상태가
+        // 완전히 동일함. 그건 기존처럼 주입하지 않아야 하므로, 채팅 기록이 아니라
+        // 생성 타입으로만 구분함.
+        if (isRerollType(lastGenerationType)) {
+            for (let i = chat.length - 1; i >= 0; i--) {
+                const m = chat[i];
+                if (m && m.is_user) {
+                    return (m.mes || "").trim();
+                }
+            }
+        }
+
         return ""; // 마지막이 AI 응답이면 = 이미 답변 받은 상태 -> 주입 안 함
     } catch (e) {
         console.error("[Force Last Input Plus] 유저 메시지 조회 실패:", e);
         return "";
     }
+}
+
+// 스와이프/재생성 계열인지 판별. ST 버전마다 타입 문자열이 조금씩 다를 수 있어서
+// 정확히 일치시키지 않고 키워드 포함 여부로 느슨하게 확인함.
+function isRerollType(type) {
+    if (!type || typeof type !== "string") return false;
+    const t = type.toLowerCase();
+    return t.includes("swipe") || t.includes("regenerate");
 }
 
 // ---------- 프롬프트 맨 끝으로 강제 재배치 ----------
@@ -161,6 +196,16 @@ function onTextCompletionPromptReady(eventData) {
 }
 
 function registerHooks() {
+    // 생성이 시작될 때 그 종류(swipe / continue / regenerate / normal 등)를 붙잡아둠.
+    // 프롬프트가 만들어지는 시점에는 이 정보를 알 수 없어서 미리 저장해둬야 함.
+    if (event_types.GENERATION_STARTED) {
+        eventSource.on(event_types.GENERATION_STARTED, (type) => {
+            lastGenerationType = typeof type === "string" ? type : null;
+        });
+    } else {
+        console.warn("[Force Last Input Plus] GENERATION_STARTED 이벤트를 찾을 수 없음 (스와이프 대응 비활성)");
+    }
+
     if (event_types.CHAT_COMPLETION_PROMPT_READY) {
         eventSource.on(event_types.CHAT_COMPLETION_PROMPT_READY, onChatCompletionPromptReady);
     } else {
