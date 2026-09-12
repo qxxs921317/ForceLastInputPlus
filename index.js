@@ -64,17 +64,22 @@ function getPendingUserText() {
         // 유저 인풋이 맨 밑에 있어야 함.
         // 그런데 이 순간 context.chat의 마지막 항목은 (아직 지워지지 않은) AI 응답이라
         // 위의 is_user 검사에 걸리지 않아서, 지금까지 스와이프 때만 기능이 통째로
-        // 빠져있었음. 그래서 이 경우에만 배열을 거꾸로 훑어 직전 유저 메시지를 찾음.
+        // 빠져있었음.
+        //
+        // ⚠️ 단, 배열을 끝까지 거슬러 올라가며 유저 메시지를 찾으면 안 됨.
+        // 예: 그리팅 -> 유저 인풋 -> AI응답1 -> AI응답2 상태에서 AI응답2를 스와이프하면,
+        // 이미 AI응답1로 답변이 끝난 옛날 인풋을 끌어와서 엉뚱하게 주입해버림.
+        // 올바른 기준은 "스와이프 대상 바로 앞 메시지가 유저 메시지인가" 하나뿐임.
+        //   - 유저 인풋 -> AI응답 (이 AI응답 스와이프)  = 그 인풋에 대한 답 -> 주입 O
+        //   - AI응답1 -> AI응답2 (이 AI응답2 스와이프)  = 이어쓰기의 재생성  -> 주입 X
         //
         // ⚠️ "입력 없이 그냥 또 전송(이어쓰기)"도 마지막 항목이 AI 응답이라 상태가
         // 완전히 동일함. 그건 기존처럼 주입하지 않아야 하므로, 채팅 기록이 아니라
         // 생성 타입으로만 구분함.
-        if (isRerollType(lastGenerationType)) {
-            for (let i = chat.length - 1; i >= 0; i--) {
-                const m = chat[i];
-                if (m && m.is_user) {
-                    return (m.mes || "").trim();
-                }
+        if (isRerollType(lastGenerationType) && chat.length >= 2) {
+            const prev = chat[chat.length - 2];
+            if (prev && prev.is_user) {
+                return (prev.mes || "").trim();
             }
         }
 
