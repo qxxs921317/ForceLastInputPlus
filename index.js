@@ -243,6 +243,8 @@ function applyButtonIcon() {
             fontSize: `${config.iconSize * 0.55}px`,
             marginRight: `${config.iconMarginRight}px`,
         });
+
+    refreshPanelStatus();
 }
 
 function buildToggleButton() {
@@ -281,23 +283,42 @@ function buildSettingsPanel() {
                 <b>🔵 Force Last Input Plus</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
-            <div class="inline-drawer-content">
-                <label for="flip-on-emoji-input">켜짐(ON) 아이콘</label>
-                <input id="flip-on-emoji-input" class="text_pole" type="text" maxlength="10" value="${config.onEmoji}">
+            <div class="inline-drawer-content flip-root">
 
-                <label for="flip-off-emoji-input">꺼짐(OFF) 아이콘</label>
-                <input id="flip-off-emoji-input" class="text_pole" type="text" maxlength="10" value="${config.offEmoji}">
+                <div class="flip-head">
+                    <span class="flip-head-name">입력 강제 최하단 삽입</span>
+                    <span id="flip-status-badge" class="flip-badge">OFF</span>
+                </div>
 
-                <label for="flip-icon-size-input">아이콘 크기 (px)</label>
-                <input id="flip-icon-size-input" class="text_pole" type="number" min="12" max="64" step="1" value="${config.iconSize}">
+                <div class="flip-row">
+                    <span class="flip-label">아이콘<small>켜짐 / 꺼짐</small></span>
+                    <div class="flip-ctl">
+                        <input id="flip-on-emoji-input" class="text_pole flip-mini" type="text" maxlength="10" value="${config.onEmoji}" title="켜짐(ON) 아이콘">
+                        <input id="flip-off-emoji-input" class="text_pole flip-mini" type="text" maxlength="10" value="${config.offEmoji}" title="꺼짐(OFF) 아이콘">
+                    </div>
+                </div>
 
-                <label for="flip-icon-margin-input">오른쪽 여백 (px)</label>
-                <input id="flip-icon-margin-input" class="text_pole" type="number" min="0" max="40" step="1" value="${config.iconMarginRight}">
+                <div class="flip-row">
+                    <span class="flip-label">크기 · 여백<small>px</small></span>
+                    <div class="flip-ctl">
+                        <input id="flip-icon-size-input" class="text_pole flip-mini" type="number" min="12" max="64" step="1" value="${config.iconSize}" title="아이콘 크기">
+                        <input id="flip-icon-margin-input" class="text_pole flip-mini" type="number" min="0" max="40" step="1" value="${config.iconMarginRight}" title="오른쪽 여백">
+                    </div>
+                </div>
 
-                <label for="flip-wrap-tag-input">감싸는 태그 이름 (&lt;태그&gt;내용&lt;/태그&gt;)</label>
-                <input id="flip-wrap-tag-input" class="text_pole" type="text" maxlength="60" value="${config.wrapTag}">
+                <div class="flip-row">
+                    <span class="flip-label">감싸는 태그</span>
+                    <input id="flip-wrap-tag-input" class="text_pole flip-tag" type="text" maxlength="60" value="${config.wrapTag}">
+                </div>
 
-                <small>💡 보내는 메시지가 맨 밑에 강제로 들어가서 AI가 절대 놓치지 않게 하는 기능이에요. 새 입력 없이 이어지는 생성(재생성/스와이프 등)에서는 중복 삽입 없이 자연스럽게 이어져요. 버튼은 전송 버튼 옆에 있어요.</small>
+                <div id="flip-tag-preview" class="flip-preview"></div>
+
+                <details class="flip-help">
+                    <summary>사용법</summary>
+                    <p>보내는 메시지를 프롬프트 <b>맨 아래</b>에 한 번 더 넣어 AI가 놓치지 않게 합니다. 버튼은 전송 버튼 왼쪽에 있어요.</p>
+                    <p>새 입력 없이 이어지는 생성(재생성·스와이프·이어쓰기)에서는 중복 삽입 없이 자연스럽게 넘어갑니다.</p>
+                </details>
+
             </div>
         </div>
     </div>
@@ -305,6 +326,8 @@ function buildSettingsPanel() {
 
     const $target = $("#extensions_settings2").length ? $("#extensions_settings2") : $("#extensions_settings");
     $target.append(html);
+
+    refreshPanelStatus();
 
     $("#flip-on-emoji-input").on("input", function () {
         const val = $(this).val().trim() || DEFAULT_CONFIG.onEmoji;
@@ -342,7 +365,24 @@ function buildSettingsPanel() {
         const val = $(this).val().trim() || DEFAULT_CONFIG.wrapTag;
         getConfig().wrapTag = val;
         saveConfig();
+        refreshPanelStatus();
     });
+}
+
+// 설정 패널의 상태 뱃지와 주입 미리보기를 현재 설정에 맞춰 갱신
+function refreshPanelStatus() {
+    const config = getConfig();
+
+    const $badge = $("#flip-status-badge");
+    if ($badge.length) {
+        $badge.text(config.enabled ? "ON" : "OFF").toggleClass("flip-badge-on", !!config.enabled);
+    }
+
+    const $preview = $("#flip-tag-preview");
+    if ($preview.length) {
+        const tag = config.wrapTag || DEFAULT_CONFIG.wrapTag;
+        $preview.text(`<${tag}>보내는 메시지<\/${tag}>`);
+    }
 }
 
 // ---------- 초기화 ----------
