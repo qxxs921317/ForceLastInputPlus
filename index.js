@@ -402,17 +402,43 @@ function refreshPanelStatus() {
 // ---------- 슬래시 명령어 ----------
 // 툴바 버튼을 숨겨도 명령어만으로 켜고 끌 수 있게 등록한다.
 
-function setEnabled(mode) {
+function setEnabled(mode, notify = true) {
     const config = getConfig();
     const m = String(mode ?? "").trim().toLowerCase();
+    const before = !!config.enabled;
 
     if (m === "on" || m === "true" || m === "1") config.enabled = true;
     else if (m === "off" || m === "false" || m === "0") config.enabled = false;
-    else if (m === "state" || m === "get") return config.enabled ? "on" : "off";
+    else if (m === "state" || m === "get") {
+        // 조회만 — 상태를 바꾸지 않고 현재 값만 알려줌
+        if (notify) {
+            toastr?.info?.(
+                config.enabled ? `켜짐 · <${config.wrapTag}>` : "꺼짐",
+                "Force Last Input Plus"
+            );
+        }
+        return config.enabled ? "on" : "off";
+    }
     else config.enabled = !config.enabled;
 
     saveConfig();
     applyButtonIcon();
+
+    if (notify) {
+        const unchanged = before === config.enabled ? " (변화 없음)" : "";
+        if (config.enabled) {
+            toastr?.success?.(
+                `입력 강제 최하단 삽입: 켜짐${unchanged}\n<${config.wrapTag}> 로 감싸서 주입합니다.`,
+                "Force Last Input Plus"
+            );
+        } else {
+            toastr?.info?.(
+                `입력 강제 최하단 삽입: 꺼짐${unchanged}`,
+                "Force Last Input Plus"
+            );
+        }
+    }
+
     return config.enabled ? "on" : "off";
 }
 
@@ -427,6 +453,9 @@ async function registerSlashCommands() {
                 saveConfig();
                 $("#flip-wrap-tag-input").val(val);
                 refreshPanelStatus();
+                toastr?.success?.(`감싸는 태그: <${val}>`, "Force Last Input Plus");
+            } else {
+                toastr?.info?.(`현재 태그: <${config.wrapTag}>`, "Force Last Input Plus");
             }
             return config.wrapTag;
         },
