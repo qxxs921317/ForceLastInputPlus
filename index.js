@@ -14,6 +14,7 @@ const DEFAULT_CONFIG = {
     iconSize: 24,
     iconMarginRight: 6,
     wrapTag: "User's Input",
+    showButton: true,
 };
 
 // (lastUserText를 캐싱하지 않고 매번 실시간으로 조회함 - 아래 getPendingUserText 참고)
@@ -242,7 +243,8 @@ function applyButtonIcon() {
             flex: `0 0 ${config.iconSize}px`,
             fontSize: `${config.iconSize * 0.55}px`,
             marginRight: `${config.iconMarginRight}px`,
-        });
+        })
+        .toggle(!!config.showButton);
 
     refreshPanelStatus();
 }
@@ -291,6 +293,11 @@ function buildSettingsPanel() {
                 </div>
 
                 <div class="flip-row">
+                    <span class="flip-label">툴바 버튼 표시<small>꺼도 /flip 명령어로 사용 가능</small></span>
+                    <label class="flip-switch"><input id="flip-show-button" type="checkbox" ${config.showButton ? "checked" : ""}><span class="flip-slider"></span></label>
+                </div>
+
+                <div class="flip-row">
                     <span class="flip-label">아이콘<small>켜짐 / 꺼짐</small></span>
                     <div class="flip-ctl">
                         <input id="flip-on-emoji-input" class="text_pole flip-mini" type="text" maxlength="10" value="${config.onEmoji}" title="켜짐(ON) 아이콘">
@@ -316,6 +323,7 @@ function buildSettingsPanel() {
                 <details class="flip-help">
                     <summary>사용법</summary>
                     <p>보내는 메시지를 프롬프트 <b>맨 아래</b>에 한 번 더 넣어 AI가 놓치지 않게 합니다. 버튼은 전송 버튼 왼쪽에 있어요.</p>
+                    <p>명령어로도 조작할 수 있어요 — <code>/flip on</code> <code>/flip off</code> <code>/flip</code> <code>/fliptag 태그이름</code></p>
                     <p>새 입력 없이 이어지는 생성(재생성·스와이프·이어쓰기)에서는 중복 삽입 없이 자연스럽게 넘어갑니다.</p>
                 </details>
 
@@ -328,6 +336,12 @@ function buildSettingsPanel() {
     $target.append(html);
 
     refreshPanelStatus();
+
+    $("#flip-show-button").on("change", function () {
+        getConfig().showButton = $(this).prop("checked");
+        saveConfig();
+        applyButtonIcon();
+    });
 
     $("#flip-on-emoji-input").on("input", function () {
         const val = $(this).val().trim() || DEFAULT_CONFIG.onEmoji;
@@ -385,10 +399,98 @@ function refreshPanelStatus() {
     }
 }
 
+// ---------- 슬래시 명령어 ----------
+// 툴바 버튼을 숨겨도 명령어만으로 켜고 끌 수 있게 등록한다.
+
+function setEnabled(mode) {
+    const config = getConfig();
+    const m = String(mode ?? "").trim().toLowerCase();
+
+    if (m === "on" || m === "true" || m === "1") config.enabled = true;
+    else if (m === "off" || m === "false" || m === "0") config.enabled = false;
+    else if (m === "state" || m === "get") return config.enabled ? "on" : "off";
+    else config.enabled = !config.enabled;
+
+    saveConfig();
+    applyButtonIcon();
+    return config.enabled ? "on" : "off";
+}
+
+async function registerSlashCommands() {
+    const handlers = {
+        flip: (_args, value) => setEnabled(value),
+        fliptag: (_args, value) => {
+            const config = getConfig();
+            const val = String(value ?? "").trim();
+            if (val) {
+                config.wrapTag = val;
+                saveConfig();
+                $("#flip-wrap-tag-input").val(val);
+                refreshPanelStatus();
+            }
+            return config.wrapTag;
+        },
+    };
+
+    const help = {
+        flip: "입력 강제 최하단 삽입을 켜거나 끕니다. 인자 없이 쓰면 토글, <code>state</code> 를 주면 현재 상태만 반환합니다. 예: <code>/flip on</code>",
+        fliptag: "감싸는 태그 이름을 바꿉니다. 인자 없이 쓰면 현재 태그를 반환합니다. 예: <code>/fliptag Users Input</code>",
+    };
+
+    try {
+        const [parserMod, cmdMod, argMod] = await Promise.all([
+            import("../../../slash-commands/SlashCommandParser.js"),
+            import("../../../slash-commands/SlashCommand.js"),
+            import("../../../slash-commands/SlashCommandArgument.js"),
+        ]);
+        const { SlashCommandParser } = parserMod;
+        const { SlashCommand } = cmdMod;
+        const { SlashCommandArgument, ARGUMENT_TYPE } = argMod;
+
+        const textArg = (desc) => SlashCommandArgument.fromProps({
+            description: desc,
+            typeList: [ARGUMENT_TYPE.STRING],
+            isRequired: false,
+        });
+
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: "flip",
+            callback: handlers.flip,
+            returns: "바뀐 뒤의 상태 (on / off)",
+            unnamedArgumentList: [textArg("on | off | toggle | state (생략하면 토글)")],
+            helpString: help.flip,
+        }));
+
+        SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+            name: "fliptag",
+            callback: handlers.fliptag,
+            returns: "현재 태그 이름",
+            unnamedArgumentList: [textArg("새 태그 이름 (생략하면 조회만)")],
+            helpString: help.fliptag,
+        }));
+
+        console.log("[Force Last Input Plus] 슬래시 명령어 등록 완료 (신형)");
+        return;
+    } catch (e) {
+        console.warn("[Force Last Input Plus] 신형 슬래시 명령어 등록 실패, 구형 방식 시도:", e);
+    }
+
+    try {
+        const { registerSlashCommand } = await import("../../../slash-commands.js");
+        for (const name of Object.keys(handlers)) {
+            registerSlashCommand(name, handlers[name], [], help[name], true, true);
+        }
+        console.log("[Force Last Input Plus] 슬래시 명령어 등록 완료 (구형)");
+    } catch (e) {
+        console.warn("[Force Last Input Plus] 슬래시 명령어 등록 실패:", e);
+    }
+}
+
 // ---------- 초기화 ----------
 
 jQuery(async () => {
     buildToggleButton();
     buildSettingsPanel();
     registerHooks();
+    registerSlashCommands();
 });
